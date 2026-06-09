@@ -21,43 +21,59 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { fallbackTourImages, fallbackTours } from "@/lib/fallback-content";
-import { fetchTours, getTourImage, type TourRecord } from "@/lib/travel-cms";
+import { fallbackTourImages } from "@/lib/fallback-content";
+import {
+  fetchBanners,
+  fetchHolidayCategories,
+  fetchHolidayPackages,
+  type BannerRecord,
+  type HolidayCategoryRecord,
+  type HolidayPackageRecord,
+} from "@/lib/travel-cms";
 import { getWhatsAppUrl } from "@/lib/whatsapp";
 
-const isMaharashtraTour = (tour: TourRecord) => {
-  const haystack = `${tour.name} ${tour.description ?? ""}`.toLowerCase();
-  const keywords = [
-    "maharashtra",
-    "mumbai",
-    "pune",
-    "shirdi",
-    "nagpur",
-    "nashik",
-    "aurangabad",
-    "kolhapur",
-  ];
-
-  return keywords.some((keyword) => haystack.includes(keyword));
+const defaultPackageImage = fallbackTourImages["Goa Beach Paradise"];
+const allCategoriesFilter = {
+  slug: "all",
+  name: "All Holidays",
 };
 
-const isGroupTour = (tour: TourRecord) => {
-  const category = (tour.category ?? "").toLowerCase();
-  if (category.includes("group")) return true;
+const getPackageCategorySlug = (packageItem: HolidayPackageRecord) =>
+  packageItem.category?.slug?.toLowerCase() ?? "";
 
-  const haystack = `${tour.name} ${tour.description ?? ""}`.toLowerCase();
-  const keywords = [
-    "group tour",
-    "group departure",
-    "fixed departure",
-    "group",
-    "groups",
-    "ladies special",
-    "senior citizen",
-    "corporate group",
-  ];
+const getPackageImage = (packageItem: HolidayPackageRecord) =>
+  packageItem.banner_image_url ||
+  fallbackTourImages[packageItem.title] ||
+  defaultPackageImage;
 
-  return keywords.some((keyword) => haystack.includes(keyword));
+const fallbackCategoryFilters = [
+  { slug: "group-tour", name: "Group Tour" },
+  { slug: "maharashtra", name: "Maharashtra" },
+  { slug: "india", name: "India" },
+  { slug: "international", name: "International" },
+];
+
+const getCategoryFilters = (
+  categories: HolidayCategoryRecord[],
+  packages: HolidayPackageRecord[],
+) => {
+  const activeCategories = categories
+    .filter((category) => category.is_active !== false)
+    .map((category) => ({ slug: category.slug, name: category.name }));
+
+  const packageCategories = packages
+    .map((packageItem) => packageItem.category)
+    .filter(Boolean)
+    .map((category) => ({ slug: category.slug, name: category.name }));
+
+  const uniqueCategories = [...activeCategories, ...packageCategories].filter(
+    (category, index, all) =>
+      category.slug && all.findIndex((item) => item.slug === category.slug) === index,
+  );
+
+  return uniqueCategories.length > 0
+    ? [allCategoriesFilter, ...uniqueCategories]
+    : [allCategoriesFilter, ...fallbackCategoryFilters];
 };
 
 const memoriesIndiaThemes = [
@@ -283,16 +299,42 @@ const MemoriesHolidayPopup = () => (
 
 const Tours = () => {
   const location = useLocation();
-  const [filter, setFilter] = useState<
-    "group" | "maharashtra" | "india" | "international"
-  >("india");
-  const [tours, setTours] = useState<TourRecord[]>([]);
+  const [filter, setFilter] = useState("all");
+  const [categories, setCategories] = useState<
+    Array<{ slug: string; name: string }>
+  >([allCategoriesFilter, ...fallbackCategoryFilters]);
+  const [packages, setPackages] = useState<HolidayPackageRecord[]>([]);
+  const [heroBanner, setHeroBanner] = useState<BannerRecord | null>(null);
   const [showMemoriesIntro, setShowMemoriesIntro] = useState(true);
 
   useEffect(() => {
-    fetchTours()
-      .then(setTours)
-      .catch(() => setTours(fallbackTours));
+    Promise.allSettled([
+      fetchHolidayPackages(),
+      fetchHolidayCategories(),
+      fetchBanners("holidays"),
+    ])
+      .then(([packagesResult, categoriesResult, bannersResult]) => {
+        const nextPackages =
+          packagesResult.status === "fulfilled" ? packagesResult.value : [];
+        const nextCategories =
+          categoriesResult.status === "fulfilled" ? categoriesResult.value : [];
+        const nextBanners =
+          bannersResult.status === "fulfilled" ? bannersResult.value : [];
+        const nextFilters = getCategoryFilters(nextCategories, nextPackages);
+
+        setPackages(nextPackages);
+        setCategories(nextFilters);
+        setHeroBanner(nextBanners[0] ?? null);
+        setFilter((currentFilter) =>
+          nextFilters.some((category) => category.slug === currentFilter)
+            ? currentFilter
+            : nextFilters[0]?.slug ?? "all",
+        );
+      })
+      .catch(() => {
+        setPackages([]);
+        setCategories([allCategoriesFilter, ...fallbackCategoryFilters]);
+      });
   }, []);
 
   useEffect(() => {
@@ -301,17 +343,11 @@ const Tours = () => {
     }
   }, [location.key, location.pathname]);
 
-  const filtered = tours.filter((tour) => {
-    if (filter === "group") return isGroupTour(tour);
-    if (filter === "india") {
-      return tour.category === "india" || tour.category === "domestic";
-    }
-    if (filter === "international") return tour.category === "international";
-    return (
-      tour.category === "maharashtra" ||
-      ((tour.category === "india" || tour.category === "domestic") &&
-        isMaharashtraTour(tour))
-    );
+  const filtered = packages.filter((packageItem) => {
+    const categorySlug = getPackageCategorySlug(packageItem);
+
+    if (filter === "all") return true;
+    return categorySlug === filter;
   });
 
   return (
@@ -332,38 +368,55 @@ const Tours = () => {
         </DialogContent>
       </Dialog>
 
-      <section className="px-4 py-8 sm:py-10">
-        <div className="container mx-auto flex flex-col items-center text-center">
-          <h1 className="text-3xl font-bold text-foreground sm:text-4xl">
-            Holiday Packages
-          </h1>
-          <p className="mt-2 max-w-2xl text-muted-foreground">
-            Discover your next adventure with our curated holiday packages
-          </p>
-        </div>
-      </section>
+      {heroBanner ? (
+        <section className="relative overflow-hidden px-4 py-20 text-white sm:py-28">
+          <img
+            src={heroBanner.mobile_image_url || heroBanner.image_url}
+            alt={heroBanner.title || "Holiday Packages"}
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+          <div className="absolute inset-0 bg-black/55" />
+          <div className="container relative z-10 mx-auto flex flex-col items-center text-center">
+            <h1 className="text-3xl font-bold sm:text-5xl">
+              {heroBanner.title || "Holiday Packages"}
+            </h1>
+            <p className="mt-3 max-w-2xl text-white/85">
+              {heroBanner.subtitle ||
+                "Discover your next adventure with our curated holiday packages"}
+            </p>
+            {heroBanner.cta_label && heroBanner.cta_link && (
+              <Link to={heroBanner.cta_link}>
+                <Button className="mt-6">{heroBanner.cta_label}</Button>
+              </Link>
+            )}
+          </div>
+        </section>
+      ) : (
+        <section className="px-4 py-8 sm:py-10">
+          <div className="container mx-auto flex flex-col items-center text-center">
+            <h1 className="text-3xl font-bold text-foreground sm:text-4xl">
+              Holiday Packages
+            </h1>
+            <p className="mt-2 max-w-2xl text-muted-foreground">
+              Discover your next adventure with our curated holiday packages
+            </p>
+          </div>
+        </section>
+      )}
 
       <section className="px-4 py-6 sm:py-8">
         <div className="container mx-auto">
           <div className="mb-6 flex flex-wrap justify-center gap-2 sm:mb-8 sm:gap-3">
-            {(["group", "maharashtra", "india", "international"] as const).map(
-              (currentFilter) => (
+            {categories.map((category) => (
                 <Button
-                  key={currentFilter}
-                  variant={filter === currentFilter ? "default" : "outline"}
-                  onClick={() => setFilter(currentFilter)}
-                  className="capitalize text-xs sm:text-sm"
+                  key={category.slug}
+                  variant={filter === category.slug ? "default" : "outline"}
+                  onClick={() => setFilter(category.slug)}
+                  className="text-xs sm:text-sm"
                 >
-                  {currentFilter === "group"
-                    ? "Group Tour"
-                    : currentFilter === "maharashtra"
-                    ? "Maharashtra"
-                    : currentFilter === "india"
-                      ? "India"
-                      : "International"}
+                  {category.name}
                 </Button>
-              ),
-            )}
+              ))}
           </div>
 
           {filtered.length === 0 ? (
@@ -384,43 +437,39 @@ const Tours = () => {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {filtered.map((tour) => (
+              {filtered.map((packageItem) => (
                 <div
-                  key={tour.id}
+                  key={packageItem.id}
                   className="group bg-card rounded-2xl overflow-hidden shadow-card hover:shadow-elevated transition-all duration-300 hover:-translate-y-1"
                 >
                   <div className="relative w-full aspect-[4/3] overflow-hidden bg-muted">
                     <img
-                      src={getTourImage(
-                        tour,
-                        fallbackTourImages,
-                        fallbackTourImages["Goa Beach Paradise"],
-                      )}
-                      alt={tour.name}
+                      src={getPackageImage(packageItem)}
+                      alt={packageItem.title}
                       loading="lazy"
                       className="w-full h-full object-contain"
                     />
                     <span className="absolute top-3 left-3 bg-primary text-primary-foreground text-xs font-medium px-3 py-1 rounded-full">
-                      {tour.category === "maharashtra"
-                        ? "Maharashtra"
-                        : tour.category === "international"
-                          ? "International"
-                          : "India"}
+                      {packageItem.category?.name || "Holiday"}
                     </span>
                   </div>
                   <div className="p-5">
                     <h3 className="font-semibold text-lg text-foreground">
-                      {tour.name}
+                      {packageItem.title}
                     </h3>
                     <div className="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
                       <span className="flex items-center gap-1">
-                        <Clock size={14} /> {tour.duration}
+                        <Clock size={14} />{" "}
+                        {packageItem.duration ||
+                          packageItem.trip_type ||
+                          "On Request"}
                       </span>
                       <span className="flex items-center gap-0.5 font-semibold text-primary">
-                        <IndianRupee size={14} /> {tour.price}
+                        <IndianRupee size={14} />{" "}
+                        {packageItem.price_label || "On Request"}
                       </span>
                     </div>
-                    <Link to={`/holidays/${tour.id}`}>
+                    <Link to={`/holidays/${packageItem.slug}`}>
                       <Button className="w-full mt-4" size="sm">
                         View Details
                       </Button>
